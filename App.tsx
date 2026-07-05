@@ -33,6 +33,7 @@ export default function App() {
   // App State variables
   const [apiKey, setApiKey] = useState<string>('');
   const [selectedVoice, setSelectedVoice] = useState<string>('alloy');
+  const [selectedLanguage, setSelectedLanguage] = useState<string>('English');
   const [showSettings, setShowSettings] = useState<boolean>(false);
   const [appState, setAppState] = useState<AppState>('idle');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -50,7 +51,7 @@ export default function App() {
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const rotateAnim = useRef(new Animated.Value(0)).current;
 
-  // Load API Key and Voice settings on startup
+  // Load API Key, Voice and Language settings on startup
   useEffect(() => {
     const loadSettings = async () => {
       try {
@@ -59,6 +60,9 @@ export default function App() {
         
         const savedVoice = await AsyncStorage.getItem('OPENAI_VOICE');
         if (savedVoice) setSelectedVoice(savedVoice);
+
+        const savedLanguage = await AsyncStorage.getItem('OPENAI_LANGUAGE');
+        if (savedLanguage) setSelectedLanguage(savedLanguage);
       } catch (err) {
         console.warn('Failed to load settings from storage:', err);
       }
@@ -127,6 +131,16 @@ export default function App() {
       await AsyncStorage.setItem('OPENAI_VOICE', voice);
     } catch (err) {
       console.warn('Failed to save voice choice:', err);
+    }
+  };
+
+  // Save Chosen Language
+  const saveLanguage = async (lang: string) => {
+    setSelectedLanguage(lang);
+    try {
+      await AsyncStorage.setItem('OPENAI_LANGUAGE', lang);
+    } catch (err) {
+      console.warn('Failed to save language choice:', err);
     }
   };
 
@@ -300,6 +314,15 @@ export default function App() {
       const match = /\.(\w+)$/.exec(filename);
       const fileType = match ? `audio/${match[1]}` : 'audio/mp4';
 
+      let whisperPrompt = '';
+      if (selectedLanguage === 'Bhojpuri') {
+        whisperPrompt = 'यह बातचीत भोजपुरी (Bhojpuri) भाषा में है। रउआ, का, बा, हई, अइनी, तनी, ठीक, लोग जैसे भोजपुरी शब्दों को देवनागरी में लिखें।';
+      } else if (selectedLanguage === 'Maithili') {
+        whisperPrompt = 'यह बातचीत मैथिली (Maithili) भाषा में है। अहां, की, छै, यौ, कतय, कहब, मैथिली जैसे शब्दों को देवनागरी में लिखें।';
+      } else if (selectedLanguage === 'Hindi') {
+        whisperPrompt = 'यह बातचीत हिंदी (Hindi) भाषा में है। शुद्ध देवनागरी लिपि का प्रयोग करें।';
+      }
+
       const sttResponse = await ReactNativeBlobUtil.fetch(
         'POST',
         'https://api.openai.com/v1/audio/transcriptions',
@@ -309,7 +332,9 @@ export default function App() {
         },
         [
           { name: 'file', filename: filename, type: fileType, data: ReactNativeBlobUtil.wrap(absolutePath) },
-          { name: 'model', data: 'whisper-1' }
+          { name: 'model', data: 'whisper-1' },
+          { name: 'language', data: selectedLanguage === 'English' ? 'en' : 'hi' },
+          { name: 'prompt', data: whisperPrompt }
         ]
       );
 
@@ -340,6 +365,19 @@ export default function App() {
         content: msg.text,
       }));
 
+      let languageInstructions = '';
+      if (selectedLanguage === 'Hindi') {
+        languageInstructions = 'You MUST respond ONLY in Hindi (हिंदी) using Devanagari script. Speak in a warm, polite, and natural Hindi tone.';
+      } else if (selectedLanguage === 'Bhojpuri') {
+        languageInstructions = 'You MUST respond ONLY in Bhojpuri (भोजपुरी) using Devanagari script. Speak in a friendly, conversational, and natural Bhojpuri tone.';
+      } else if (selectedLanguage === 'Maithili') {
+        languageInstructions = 'You MUST respond ONLY in Maithili (मैथिली) using Devanagari script. Speak in a sweet, polite, and natural Maithili tone.';
+      } else {
+        languageInstructions = 'You MUST respond ONLY in English. Speak in a friendly, natural English tone.';
+      }
+
+      const systemPrompt = `You are Echo, a conversational, intelligent, and warm voice assistant. ${languageInstructions} Keep your responses short (1 to 3 sentences maximum) and easy to read aloud, as they will be spoken by text-to-speech. Never use markdown formatting (like asterisks, bolding, bullet points, or list numbers). Speak naturally.`;
+
       const gptResponse = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
         headers: {
@@ -351,7 +389,7 @@ export default function App() {
           messages: [
             {
               role: 'system',
-              content: 'You are Echo, a conversational, intelligent, and warm voice assistant. Keep your responses short (1 to 3 sentences maximum) and easy to read aloud, as they will be spoken by text-to-speech. Never use markdown formatting (like asterisks, bolding, bullet points, or list numbers). Speak naturally.',
+              content: systemPrompt,
             },
             ...messageHistory,
           ],
@@ -384,6 +422,7 @@ export default function App() {
           model: 'tts-1',
           input: assistantText,
           voice: selectedVoice,
+          speed: 0.94,
         })
       );
 
@@ -396,7 +435,7 @@ export default function App() {
 
       const base64Audio = await ttsResponse.base64();
       const { dirs } = ReactNativeBlobUtil.fs;
-      const fileUri = `${dirs.CacheDir}/assistant_audio.mp3`;
+      const fileUri = `${dirs.CacheDir}/msg_${assistantMsg.id}.mp3`;
       await ReactNativeBlobUtil.fs.writeFile(fileUri, base64Audio, 'base64');
 
       // --- PHASE 4: AUDIOPLAYER PLAYBACK ---
@@ -435,6 +474,87 @@ export default function App() {
       // Ignore
     }
     setAppState('idle');
+  };
+
+  // Replay speech for a specific message
+  const replaySpeech = async (msgId: string, text: string) => {
+    if (appState === 'recording' || appState === 'transcribing' || appState === 'thinking' || appState === 'generating') {
+      return;
+    }
+
+    const { dirs } = ReactNativeBlobUtil.fs;
+    const fileUri = `${dirs.CacheDir}/msg_${msgId}.mp3`;
+
+    try {
+      // Check if this message's audio is already cached locally
+      const fileExists = await ReactNativeBlobUtil.fs.exists(fileUri);
+
+      if (fileExists) {
+        setAppState('speaking');
+        await stopAllSound();
+        const playUri = Platform.OS === 'android' ? `file://${fileUri}` : fileUri;
+        await audioRecorderPlayer.startPlayer(playUri);
+
+        audioRecorderPlayer.addPlayBackListener((e: any) => {
+          if (e.current_position >= e.duration && e.duration > 0) {
+            audioRecorderPlayer.stopPlayer().catch(() => {});
+            audioRecorderPlayer.removePlayBackListener();
+            setAppState('idle');
+          }
+        });
+        return;
+      }
+
+      // If not cached, fetch from OpenAI TTS and write it to the unique message audio file path
+      if (!apiKey.trim()) {
+        Alert.alert('API Key Missing', 'Please enter your OpenAI API key in Settings.');
+        return;
+      }
+      
+      setAppState('generating');
+
+      const ttsResponse = await ReactNativeBlobUtil.fetch(
+        'POST',
+        'https://api.openai.com/v1/audio/speech',
+        {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        JSON.stringify({
+          model: 'tts-1',
+          input: text,
+          voice: selectedVoice,
+          speed: 0.94,
+        })
+      );
+
+      const ttsStatus = ttsResponse.info().status;
+
+      if (ttsStatus < 200 || ttsStatus >= 300) {
+        const errorText = await ttsResponse.text();
+        throw new Error(`Speech Replay error (${ttsStatus}): ${errorText}`);
+      }
+
+      const base64Audio = await ttsResponse.base64();
+      await ReactNativeBlobUtil.fs.writeFile(fileUri, base64Audio, 'base64');
+
+      setAppState('speaking');
+      await stopAllSound();
+      const playUri = Platform.OS === 'android' ? `file://${fileUri}` : fileUri;
+      await audioRecorderPlayer.startPlayer(playUri);
+
+      audioRecorderPlayer.addPlayBackListener((e: any) => {
+        if (e.current_position >= e.duration && e.duration > 0) {
+          audioRecorderPlayer.stopPlayer().catch(() => {});
+          audioRecorderPlayer.removePlayBackListener();
+          setAppState('idle');
+        }
+      });
+    } catch (err: any) {
+      console.error('Error replaying speech:', err);
+      setAppState('error');
+      setErrorMessage(err.message || 'Error replaying speech.');
+    }
   };
 
   // Handles orb interactions based on active state (recording, speaking, idle)
@@ -587,6 +707,26 @@ export default function App() {
               </TouchableOpacity>
             ))}
           </View>
+          <Text style={styles.settingsLabel}>Response Language</Text>
+          <View style={styles.voiceRow}>
+            {['English', 'Hindi', 'Bhojpuri', 'Maithili'].map((lang) => (
+              <TouchableOpacity
+                key={lang}
+                style={[
+                  styles.voiceChip,
+                  selectedLanguage === lang && styles.voiceChipActive
+                ]}
+                onPress={() => saveLanguage(lang)}
+              >
+                <Text style={[
+                  styles.voiceChipText,
+                  selectedLanguage === lang && styles.voiceChipTextActive
+                ]}>
+                  {lang}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
 
           <TouchableOpacity style={styles.clearButton} onPress={clearChatHistory}>
             <Text style={styles.clearButtonText}>Clear Chat Log</Text>
@@ -627,9 +767,20 @@ export default function App() {
                   msg.role === 'user' ? styles.messageUserBubble : styles.messageAgentBubble
                 ]}
               >
-                <Text style={styles.messageSender}>
-                  {msg.role === 'user' ? 'You' : 'Echo'}
-                </Text>
+                <View style={styles.messageHeaderRow}>
+                  <Text style={styles.messageSender}>
+                    {msg.role === 'user' ? 'You' : 'Echo'}
+                  </Text>
+                  {msg.role === 'assistant' && (
+                    <TouchableOpacity 
+                      onPress={() => replaySpeech(msg.id, msg.text)}
+                      style={styles.replayButton}
+                      activeOpacity={0.7}
+                    >
+                      <Text style={styles.replayButtonText}>🔊 Listen</Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
                 <Text style={styles.messageText}>{msg.text}</Text>
               </View>
             </View>
@@ -1067,5 +1218,25 @@ const styles = StyleSheet.create({
   },
   testResultError: {
     color: '#EF4444',
+  },
+  messageHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    width: '100%',
+    marginBottom: 4,
+  },
+  replayButton: {
+    backgroundColor: '#7C4DFF20',
+    borderColor: 'rgba(124, 77, 255, 0.4)',
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingVertical: 2,
+    paddingHorizontal: 8,
+  },
+  replayButtonText: {
+    color: '#7C4DFF',
+    fontSize: 10,
+    fontWeight: '700',
   },
 });
